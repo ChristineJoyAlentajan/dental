@@ -3,52 +3,109 @@ require_once 'includes/config.php';
 require_once 'includes/functions.php';
 
 $active_tab = 'login';
+$error = null;
+$success = null;
+
+function validateRegistrationInput(
+    $first_name,
+    $last_name,
+    $email,
+    $username,
+    $password,
+    $confirm_password,
+    $role
+) {
+    $first_name = trim((string) $first_name);
+    $last_name = trim((string) $last_name);
+    $email = trim((string) $email);
+    $username = trim((string) $username);
+    $password = (string) $password;
+    $confirm_password = (string) $confirm_password;
+    $role = trim((string) $role);
+
+    if ($first_name === '' || $last_name === '' || $email === '' || $username === '' || $password === '' || $role === '') {
+        return 'Please fill all required fields';
+    }
+
+    if (strlen($password) < 6) {
+        return 'Password must be at least 6 characters long';
+    }
+
+    if ($password !== $confirm_password) {
+        return 'Passwords do not match';
+    }
+
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return 'Invalid email address';
+    }
+
+    if (!in_array($role, ['patient', 'dentist'], true)) {
+        return 'Invalid role selected';
+    }
+
+    if (strlen($username) < 3 || strlen($username) > 30) {
+        return 'Username must be between 3 and 30 characters';
+    }
+
+    if (preg_match('/[^a-zA-Z0-9_.-]/', $username)) {
+        return 'Username can only contain letters, numbers, dots, underscores, and dashes';
+    }
+
+    return null;
+}
+
+function getUserByUsername($conn, $username) {
+    $stmt = $conn->prepare("SELECT * FROM users WHERE username = ? AND is_active = 1 LIMIT 1");
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('s', $username);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $user = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+
+    return $user;
+}
 
 // Handle login
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'login') {
-    
     $username = sanitize($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
-    
-    if (empty($username) || empty($password)) {
+
+    if (trim($username) === '' || trim((string) $password) === '') {
         $error = 'Please enter username and password';
     } else {
-        // Get user from database
-        $result = $conn->query("SELECT * FROM users WHERE username = '$username' AND is_active = 1");
-        
-        if ($result && $result->num_rows > 0) {
-            $user = $result->fetch_assoc();
-            
-            // Verify password
-            if (verifyPassword($password, $user['password'])) {
-                // Login successful
-                $_SESSION['user_id'] = $user['user_id'];
-                $_SESSION['username'] = $user['username'];
-                $_SESSION['role'] = $user['role'];
-                $_SESSION['name'] = $user['first_name'] . ' ' . $user['last_name'];
-                
-                // Update last login
-                $conn->query("UPDATE users SET last_login = NOW() WHERE user_id = " . $user['user_id']);
-                
-                // Log audit
-                logAudit('User login', 'users', $user['user_id']);
-                
-                // Redirect to appropriate dashboard
-                if ($user['role'] == 'patient') {
-                    header("Location: patient/index.php");
-                } elseif ($user['role'] == 'dentist') {
-                    header("Location: dentist/index.php");
-                } elseif ($user['role'] == 'staff') {
-                    header("Location: staff/index.php");
-                } elseif ($user['role'] == 'admin') {
-                    header("Location: admin/index.php");
-                }
-                exit();
-            } else {
-                $error = 'Username or password is incorrect';
+        $user = getUserByUsername($conn, $username);
+
+        if ($user && verifyPassword($password, $user['password'])) {
+            $_SESSION['user_id'] = $user['user_id'];
+            $_SESSION['username'] = $user['username'];
+            $_SESSION['role'] = $user['role'];
+            $_SESSION['name'] = $user['first_name'] . ' ' . $user['last_name'];
+
+            $update_stmt = $conn->prepare("UPDATE users SET last_login = NOW() WHERE user_id = ?");
+            if ($update_stmt) {
+                $update_stmt->bind_param('i', $user['user_id']);
+                $update_stmt->execute();
+                $update_stmt->close();
             }
+
+            logAudit('User login', 'users', $user['user_id']);
+
+            if ($user['role'] == 'patient') {
+                header("Location: patient/index.php");
+            } elseif ($user['role'] == 'dentist') {
+                header("Location: dentist/index.php");
+            } elseif ($user['role'] == 'staff') {
+                header("Location: staff/index.php");
+            } elseif ($user['role'] == 'admin') {
+                header("Location: admin/index.php");
+            }
+            exit();
         } else {
-            $error = 'User not found';
+            $error = 'Username or password is incorrect';
         }
     }
 }
@@ -56,7 +113,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
 // Handle registration
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['action'] == 'register') {
     $active_tab = 'register';
-    
+
     $first_name = sanitize($_POST['first_name'] ?? '');
     $last_name = sanitize($_POST['last_name'] ?? '');
     $email = sanitize($_POST['email'] ?? '');
@@ -66,77 +123,82 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
     $confirm_password = $_POST['confirm_password'] ?? '';
     $role = sanitize($_POST['role'] ?? '');
     $dob = sanitize($_POST['dob'] ?? '');
-    
-    // Validation
-    if (
-        empty($first_name) ||
-        empty($last_name) ||
-        empty($email) ||
-        empty($username) ||
-        empty($password) ||
-        empty($role)
-    ) {
-        $error = 'Please fill all required fields';
-    }
-    elseif (strlen($password) < 6) {
-        $error = 'Password must be at least 6 characters long';
-    } 
-    // fix password confirmation check to ensure both passwords match
-    elseif ($password != $confirm_password) {
-        $error = 'Passwords do not match';
-    } 
-    elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $error = 'Invalid email address';
-    } 
-    elseif (!in_array($role, ['patient', 'dentist'])) {
-        $error = 'Invalid role selected';
-    } 
-    else {
-        // Check if username already exists
-        $check_username = $conn->query("SELECT user_id FROM users WHERE username = '$username'");
-        
-        if ($check_username && $check_username->num_rows > 0) 
-        {
-            $error = 'Username already exists';
-        } 
-        else {
-            // Check if email already exists
-            $check_email = $conn->query("SELECT user_id FROM users WHERE email = '$email'");
-            
-            if ($check_email && $check_email->num_rows > 0) 
-            {
-                $error = 'Email already registered';
-            } 
-            else {
-                // Hash password and insert user
-                $hashed_password = hashPassword($password);
 
-                // check if gender is set, if not default to 'Not Specified'
-                $gender = isset($_POST['gender']) ? sanitize($_POST['gender']) : 'Not Specified';
+    $validation_error = validateRegistrationInput(
+        $first_name,
+        $last_name,
+        $email,
+        $username,
+        $password,
+        $confirm_password,
+        $role
+    );
 
-                // check if date of birth is set, if not default to NULL
-                $address = sanitize($_POST['address'] ?? '');
-                
-                // Insert user into database
-                $insert_query = "INSERT INTO users 
-                    (first_name, last_name, email, phone, username, password, role, gender, date_of_birth, address, is_active, created_at) 
-                    VALUES 
-                    ('$first_name', '$last_name', '$email', '$phone', '$username', '$hashed_password', '$role', '$gender', '$dob', '$address', 1, NOW())";
-                
-                // execute the query and check for success
-                if ($conn->query($insert_query)) 
-                {
-                    $user_id = $conn->insert_id;
+    if ($validation_error) {
+        $error = $validation_error;
+    } else {
+        $username_check = $conn->prepare("SELECT user_id FROM users WHERE username = ? LIMIT 1");
+        $email_check = $conn->prepare("SELECT user_id FROM users WHERE email = ? LIMIT 1");
 
-                    logAudit('New user registered', 'users', $user_id);
+        if (!$username_check || !$email_check) {
+            $error = 'Error creating account. Please try again.';
+        } else {
+            $username_check->bind_param('s', $username);
+            $username_check->execute();
+            $username_result = $username_check->get_result();
 
-                    $success = 'Account created successfully! You can now login.';
-                } 
-                else 
-                {
-                    $error = 'Error creating account. Please try again.';
+            if ($username_result && $username_result->num_rows > 0) {
+                $error = 'Username already exists';
+            } else {
+                $email_check->bind_param('s', $email);
+                $email_check->execute();
+                $email_result = $email_check->get_result();
+
+                if ($email_result && $email_result->num_rows > 0) {
+                    $error = 'Email already registered';
+                } else {
+                    $gender = isset($_POST['gender']) ? sanitize($_POST['gender']) : 'Not Specified';
+                    $address = sanitize($_POST['address'] ?? '');
+                    $hashed_password = hashPassword($password);
+
+                    $insert_query = $conn->prepare(
+                        "INSERT INTO users 
+                        (first_name, last_name, email, phone, username, password, role, gender, date_of_birth, address, is_active, created_at) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())"
+                    );
+
+                    if (!$insert_query) {
+                        $error = 'Error creating account. Please try again.';
+                    } else {
+                        $insert_query->bind_param(
+                            'ssssssssss',
+                            $first_name,
+                            $last_name,
+                            $email,
+                            $phone,
+                            $username,
+                            $hashed_password,
+                            $role,
+                            $gender,
+                            $dob,
+                            $address
+                        );
+
+                        if ($insert_query->execute()) {
+                            $user_id = $conn->insert_id;
+                            logAudit('New user registered', 'users', $user_id);
+                            $success = 'Account created successfully! You can now login.';
+                        } else {
+                            $error = 'Error creating account. Please try again.';
+                        }
+
+                        $insert_query->close();
+                    }
                 }
             }
+
+            $username_check->close();
+            $email_check->close();
         }
     }
 }
@@ -295,13 +357,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
         <!-- Tabs Navigation -->
         <ul class="nav nav-tabs mb-3" role="tablist">
             <li class="nav-item" role="presentation">
-                <button class="nav-link <?php echo $active_tab == 'login' ? 'active' : ''; ?>" 
+                <button class="nav-link <?php echo $active_tab == 'login' ? 'active' : ''; ?>"
                         id="login-tab" data-bs-toggle="tab" data-bs-target="#login" type="button" role="tab">
                     <i class="fas fa-sign-in-alt"></i> Login
                 </button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link <?php echo $active_tab == 'register' ? 'active' : ''; ?>" 
+                <button class="nav-link <?php echo $active_tab == 'register' ? 'active' : ''; ?>"
                         id="register-tab" data-bs-toggle="tab" data-bs-target="#register" type="button" role="tab">
                     <i class="fas fa-user-plus"></i> Create Account
                 </button>
@@ -322,17 +384,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
 
                 <form method="POST">
                     <input type="hidden" name="action" value="login">
-                    
+
                     <div class="mb-3">
                         <label for="username" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="username" name="username" 
+                        <input type="text" class="form-control" id="username" name="username"
                                placeholder="Enter username" required autofocus>
                     </div>
 
                     <div class="mb-3">
                         <label for="password" class="form-label">Password</label>
                         <div class="password-wrapper">
-                            <input type="password" class="form-control" id="password" name="password" 
+                            <input type="password" class="form-control" id="password" name="password"
                                    placeholder="Enter password" required>
                             <button type="button" class="btn-toggle-password" onclick="togglePassword('password')">
                                 <i class="fas fa-eye"></i>
@@ -377,30 +439,30 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
 
                 <form method="POST">
                     <input type="hidden" name="action" value="register">
-                    
+
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label for="first_name" class="form-label">First Name *</label>
-                            <input type="text" class="form-control" id="first_name" name="first_name" 
+                            <input type="text" class="form-control" id="first_name" name="first_name"
                                    placeholder="First name">
                         </div>
 
                         <div class="col-md-6 mb-3">
                             <label for="last_name" class="form-label">Last Name *</label>
-                            <input type="text" class="form-control" id="last_name" name="last_name" 
+                            <input type="text" class="form-control" id="last_name" name="last_name"
                                    placeholder="Last name">
                         </div>
                     </div>
 
                     <div class="mb-3">
                         <label for="email" class="form-label">Email Address *</label>
-                        <input type="email" class="form-control" id="email" name="email" 
+                        <input type="email" class="form-control" id="email" name="email"
                                placeholder="your@email.com">
                     </div>
 
                     <div class="mb-3">
                         <label for="phone" class="form-label">Phone Number</label>
-                        <input type="tel" class="form-control" id="phone" name="phone" 
+                        <input type="tel" class="form-control" id="phone" name="phone"
                                placeholder="+1-800-000-0000">
                     </div>
 
@@ -421,7 +483,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
 
                     <div class="mb-3">
                         <label for="register_role" class="form-label">I want to register as: *</label>
-                        <select class="form-control" id="register_role" name="role" >
+                        <select class="form-control" id="register_role" name="role">
                             <option value="">-- Select Role --</option>
                             <option value="patient">Patient - Book appointments and track treatments</option>
                             <option value="dentist">Dentist - Manage appointments and patient records</option>
@@ -430,15 +492,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
 
                     <div class="mb-3">
                         <label for="register_username" class="form-label">Username *</label>
-                        <input type="text" class="form-control" id="register_username" name="username" 
-                               placeholder="Choose a username" >
+                        <input type="text" class="form-control" id="register_username" name="username"
+                               placeholder="Choose a username">
                     </div>
 
                     <div class="mb-3">
                         <label for="register_password" class="form-label">Password *</label>
                         <div class="password-wrapper">
-                            <input type="password" class="form-control" id="register_password" name="password" 
-                                   placeholder="Min 6 characters" >
+                            <input type="password" class="form-control" id="register_password" name="password"
+                                   placeholder="Min 6 characters">
                             <button type="button" class="btn-toggle-password" onclick="togglePassword('register_password')">
                                 <i class="fas fa-eye"></i>
                             </button>
@@ -448,7 +510,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
                     <div class="mb-3">
                         <label for="confirm_password" class="form-label">Confirm Password *</label>
                         <div class="password-wrapper">
-                            <input type="password" class="form-control" id="confirm_password" name="confirm_password" 
+                            <input type="password" class="form-control" id="confirm_password" name="confirm_password"
                                    placeholder="Re-enter password">
                             <button type="button" class="btn-toggle-password" onclick="togglePassword('confirm_password')">
                                 <i class="fas fa-eye"></i>
@@ -478,7 +540,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && $_POST['a
             const passwordField = document.getElementById(fieldId);
             const button = event.target.closest('.btn-toggle-password');
             const icon = button.querySelector('i');
-            
+
             if (passwordField.type === 'password') {
                 passwordField.type = 'text';
                 icon.classList.remove('fa-eye');
